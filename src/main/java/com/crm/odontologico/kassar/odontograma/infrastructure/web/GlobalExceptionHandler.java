@@ -40,7 +40,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AiProviderCommunicationException.class)
     public ProblemDetail handleAiProviderCommunication(AiProviderCommunicationException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_GATEWAY, ex.getMessage());
-        problem.setTitle("Error de comunicación con el motor de IA (Ollama)");
+        problem.setTitle("Error de comunicación con el proveedor de IA");
         problem.setType(URI.create("https://crm-odontologico.com/errors/ai-provider-unavailable"));
         problem.setProperty("timestamp", Instant.now());
         return problem;

@@ -3,6 +3,7 @@ package com.crm.odontologico.kassar.odontograma.infrastructure.ai.ollama;
 import com.crm.odontologico.kassar.odontograma.application.port.AiChatMessage;
 import com.crm.odontologico.kassar.odontograma.application.port.OdontogramaAiPort;
 import com.crm.odontologico.kassar.odontograma.domain.exception.AiProviderCommunicationException;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -21,6 +22,7 @@ import java.util.Map;
  * falla las validaciones clínicas del Backend.
  */
 @Component
+@ConditionalOnProperty(prefix = "odontograma.ai", name = "provider", havingValue = "ollama")
 public class OllamaAiAdapter implements OdontogramaAiPort {
 
     private static final Logger log = LoggerFactory.getLogger(OllamaAiAdapter.class);
