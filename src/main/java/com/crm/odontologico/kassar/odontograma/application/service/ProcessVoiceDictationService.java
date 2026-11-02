@@ -6,11 +6,14 @@ import com.crm.odontologico.kassar.odontograma.application.mapper.OdontogramaDom
 import com.crm.odontologico.kassar.odontograma.application.port.AiChatMessage;
 import com.crm.odontologico.kassar.odontograma.application.port.OdontogramaAiPort;
 import com.crm.odontologico.kassar.odontograma.application.validation.AiResponseValidator;
+import com.crm.odontologico.kassar.odontograma.application.validation.ClinicalDictationParser;
+import com.crm.odontologico.kassar.odontograma.application.validation.ValidatedToothDraft;
 import com.crm.odontologico.kassar.odontograma.application.validation.ValidationResult;
 import com.crm.odontologico.kassar.odontograma.domain.exception.AiValidationExhaustedException;
 import com.crm.odontologico.kassar.odontograma.domain.exception.InvalidVoiceCaptureRequestException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import tools.jackson.core.JacksonException;
@@ -18,16 +21,19 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Caso de uso central que orquesta:
  * <ol>
- *   <li>La normalización y validación del {@link VoiceCaptureRequest} proveniente del Frontend.</li>
+ *   <li>La normalización y análisis clínico del {@link VoiceCaptureRequest} proveniente del Frontend.</li>
  *   <li>La invocación al modelo de IA a través de {@link OdontogramaAiPort}.</li>
- *   <li>La validación clínica y anatómica de la respuesta mediante {@link AiResponseValidator}
- *       con un bucle de autocorrección (enviando retroalimentación de errores al modelo).</li>
- *   <li>El enriquecimiento autoritativo del {@link OdontogramaUpdateResponse} mediante {@link OdontogramaDomainMapper}.</li>
+ *   <li>La validación clínica, anatómica y de completitud de la respuesta mediante {@link AiResponseValidator}
+ *       y {@link ClinicalDictationParser}, con bucle de autocorrección hacia el modelo.</li>
+ *   <li>La reconciliación de piezas dentales cuando el modelo local omite dientes en dictados extensos
+ *       y el enriquecimiento autoritativo del {@link OdontogramaUpdateResponse}.</li>
  * </ol>
  */
 @Service
@@ -38,14 +44,17 @@ public class ProcessVoiceDictationService {
     private final OdontogramaAiPort aiPort;
     private final OdontogramaPromptBuilder promptBuilder;
     private final AiResponseValidator responseValidator;
+    private final ClinicalDictationParser dictationParser;
     private final OdontogramaDomainMapper domainMapper;
     private final ObjectMapper objectMapper;
     private final int maxValidationAttempts;
 
+    @Autowired
     public ProcessVoiceDictationService(
             OdontogramaAiPort aiPort,
             OdontogramaPromptBuilder promptBuilder,
             AiResponseValidator responseValidator,
+            ClinicalDictationParser dictationParser,
             OdontogramaDomainMapper domainMapper,
             ObjectMapper objectMapper,
             @Value("${odontograma.ai.max-attempts:3}") int maxValidationAttempts
@@ -53,17 +62,41 @@ public class ProcessVoiceDictationService {
         this.aiPort = aiPort;
         this.promptBuilder = promptBuilder;
         this.responseValidator = responseValidator;
+        this.dictationParser = dictationParser;
         this.domainMapper = domainMapper;
         this.objectMapper = objectMapper;
         this.maxValidationAttempts = Math.max(1, maxValidationAttempts);
     }
 
+    public ProcessVoiceDictationService(
+            OdontogramaAiPort aiPort,
+            OdontogramaPromptBuilder promptBuilder,
+            AiResponseValidator responseValidator,
+            OdontogramaDomainMapper domainMapper,
+            ObjectMapper objectMapper,
+            int maxValidationAttempts
+    ) {
+        this(
+                aiPort,
+                promptBuilder,
+                responseValidator,
+                new ClinicalDictationParser(),
+                domainMapper,
+                objectMapper,
+                maxValidationAttempts
+        );
+    }
+
     public OdontogramaUpdateResponse procesarDictado(VoiceCaptureRequest rawRequest) {
         NormalizedRequest request = normalizarYValidarRequest(rawRequest);
 
+        String textoNormalizado = dictationParser.normalizarTextoDictado(request.textoCapturado());
+        List<ValidatedToothDraft> dientesEsperados = dictationParser.extraerDientesDelDictado(request.textoCapturado());
+
         List<AiChatMessage> historial = new ArrayList<>();
         historial.add(AiChatMessage.system(promptBuilder.obtenerSystemPrompt()));
-        historial.add(AiChatMessage.user(promptBuilder.construirPromptUsuario(request.textoCapturado())));
+        historial.add(AiChatMessage.user(promptBuilder.construirPromptUsuario(
+                textoNormalizado.isEmpty() ? request.textoCapturado() : textoNormalizado)));
 
         List<String> ultimosErrores = List.of();
         String ultimaRespuestaCruda = "";
@@ -80,15 +113,27 @@ public class ProcessVoiceDictationService {
                 log.info("Duración de llamada al LLM para odontogramaId='{}' (intento {}/{}): {} ms",
                         request.odontogramaId(), intento, maxValidationAttempts, duracionMs);
             }
-            ValidationResult resultado = responseValidator.validar(ultimaRespuestaCruda);
+            ValidationResult resultadoEstricto = responseValidator.validarContraDictado(
+                    ultimaRespuestaCruda, dientesEsperados);
 
-            if (resultado.isValid()) {
+            if (resultadoEstricto.isValid()) {
                 log.info("Respuesta del modelo validada exitosamente en el intento {} ({} diente(s) procesado(s))",
-                        intento, resultado.dientesValidados().size());
-                return domainMapper.toUpdateResponse(request.odontogramaId(), resultado.dientesValidados());
+                        intento, resultadoEstricto.dientesValidados().size());
+                return domainMapper.toUpdateResponse(request.odontogramaId(), resultadoEstricto.dientesValidados());
             }
 
-            ultimosErrores = resultado.errores();
+            // Verifica si la estructura JSON/FDI base es válida pero el modelo local omitió o desalineó dientes
+            // en un dictado múltiple complejo: en ese caso reconciliamos con los dientes extraídos del dictado.
+            ValidationResult resultadoBase = responseValidator.validar(ultimaRespuestaCruda);
+            if (resultadoBase.isValid() && !dientesEsperados.isEmpty()) {
+                log.info("Reconciliando respuesta parcial del modelo ({} diente(s)) con los {} diente(s) detectados en el dictado clínico: {}",
+                        resultadoBase.dientesValidados().size(), dientesEsperados.size(), resultadoEstricto.errores());
+                List<ValidatedToothDraft> reconciliados = reconciliarDientes(
+                        resultadoBase.dientesValidados(), dientesEsperados);
+                return domainMapper.toUpdateResponse(request.odontogramaId(), reconciliados);
+            }
+
+            ultimosErrores = resultadoEstricto.errores();
             log.warn("Intento {}/{} falló validación para odontogramaId='{}'. Errores detectados: {}",
                     intento, maxValidationAttempts, request.odontogramaId(), ultimosErrores);
 
@@ -98,7 +143,27 @@ public class ProcessVoiceDictationService {
             }
         }
 
+        if (!dientesEsperados.isEmpty()) {
+            log.warn("El modelo no produjo un JSON válido tras {} intentos; aplicando extracción clínica determinística de respaldo ({} diente(s)).",
+                    maxValidationAttempts, dientesEsperados.size());
+            return domainMapper.toUpdateResponse(request.odontogramaId(), dientesEsperados);
+        }
+
         throw new AiValidationExhaustedException(maxValidationAttempts, ultimosErrores, ultimaRespuestaCruda);
+    }
+
+    private List<ValidatedToothDraft> reconciliarDientes(
+            List<ValidatedToothDraft> dientesDelModelo,
+            List<ValidatedToothDraft> dientesDelDictado
+    ) {
+        Map<Integer, ValidatedToothDraft> consolidado = new LinkedHashMap<>();
+        for (ValidatedToothDraft esperado : dientesDelDictado) {
+            consolidado.put(esperado.metadata().numero(), esperado);
+        }
+        for (ValidatedToothDraft delModelo : dientesDelModelo) {
+            consolidado.putIfAbsent(delModelo.metadata().numero(), delModelo);
+        }
+        return List.copyOf(consolidado.values());
     }
 
     /**
