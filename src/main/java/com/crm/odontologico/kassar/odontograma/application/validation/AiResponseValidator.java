@@ -12,8 +12,9 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -75,6 +76,73 @@ public class AiResponseValidator {
         }
 
         return new ValidationResult(dientesValidados, errores);
+    }
+
+    /**
+     * Valida la respuesta del modelo de IA y además verifica que coincida con todos los dientes
+     * y hallazgos detectados en el dictado clínico original.
+     */
+    public ValidationResult validarContraDictado(
+            String rawAiResponse,
+            List<ValidatedToothDraft> dientesEsperadosDelDictado
+    ) {
+        ValidationResult baseResult = validar(rawAiResponse);
+        if (!baseResult.isValid() || dientesEsperadosDelDictado == null || dientesEsperadosDelDictado.isEmpty()) {
+            return baseResult;
+        }
+
+        List<String> errores = new ArrayList<>(baseResult.errores());
+        Map<Integer, ValidatedToothDraft> porNumeroEnAi = new LinkedHashMap<>();
+        for (ValidatedToothDraft d : baseResult.dientesValidados()) {
+            porNumeroEnAi.put(d.metadata().numero(), d);
+        }
+
+        List<Integer> faltantes = new ArrayList<>();
+        for (ValidatedToothDraft esperado : dientesEsperadosDelDictado) {
+            int num = esperado.metadata().numero();
+            ValidatedToothDraft recibido = porNumeroEnAi.get(num);
+            if (recibido == null) {
+                faltantes.add(num);
+                continue;
+            }
+            verificarConcordanciaDeHallazgos(esperado, recibido, errores);
+        }
+
+        if (!faltantes.isEmpty()) {
+            errores.add("El modelo omitió los siguientes dientes mencionados explícitamente en el dictado: " + faltantes + ".");
+        }
+
+        return new ValidationResult(baseResult.dientesValidados(), errores);
+    }
+
+    private void verificarConcordanciaDeHallazgos(
+            ValidatedToothDraft esperado,
+            ValidatedToothDraft recibido,
+            List<String> errores
+    ) {
+        int num = esperado.metadata().numero();
+        if (esperado.mesial() != recibido.mesial()) {
+            errores.add("Diente " + num + ": cara mesial esperaba '" + esperado.mesial().getEtiqueta()
+                    + "' según el dictado, pero el modelo devolvió '" + recibido.mesial().getEtiqueta() + "'.");
+        }
+        if (esperado.distal() != recibido.distal()) {
+            errores.add("Diente " + num + ": cara distal esperaba '" + esperado.distal().getEtiqueta()
+                    + "' según el dictado, pero el modelo devolvió '" + recibido.distal().getEtiqueta() + "'.");
+        }
+        if (esperado.vestibular() != recibido.vestibular()) {
+            errores.add("Diente " + num + ": cara vestibular esperaba '" + esperado.vestibular().getEtiqueta()
+                    + "' según el dictado, pero el modelo devolvió '" + recibido.vestibular().getEtiqueta() + "'.");
+        }
+        if (esperado.palatinoLingual() != recibido.palatinoLingual()) {
+            errores.add("Diente " + num + ": cara " + esperado.metadata().etiquetaCaraInterna()
+                    + " esperaba '" + esperado.palatinoLingual().getEtiqueta()
+                    + "' según el dictado, pero el modelo devolvió '" + recibido.palatinoLingual().getEtiqueta() + "'.");
+        }
+        if (esperado.oclusalIncisal() != recibido.oclusalIncisal()) {
+            errores.add("Diente " + num + ": cara " + esperado.metadata().etiquetaCaraMasticatoria()
+                    + " esperaba '" + esperado.oclusalIncisal().getEtiqueta()
+                    + "' según el dictado, pero el modelo devolvió '" + recibido.oclusalIncisal().getEtiqueta() + "'.");
+        }
     }
 
     private List<JsonNode> extraerNodosDientes(JsonNode root, List<String> errores) {
@@ -186,9 +254,11 @@ public class AiResponseValidator {
         }
 
         if (errores.size() == erroresAntesDelDiente) {
+            EstadoClinico estadoGeneralNormalizado = normalizarEstadoGeneralSegunCaras(
+                    estadoGeneral, mesial, distal, vestibular, palatinoLingual, oclusalIncisal);
             dientesValidados.add(new ValidatedToothDraft(
                     metadata,
-                    estadoGeneral,
+                    estadoGeneralNormalizado,
                     mesial,
                     distal,
                     vestibular,
@@ -359,6 +429,32 @@ public class AiResponseValidator {
                 }
             }
         }
+    }
+
+    private EstadoClinico normalizarEstadoGeneralSegunCaras(
+            EstadoClinico estadoGeneral,
+            EstadoClinico mesial,
+            EstadoClinico distal,
+            EstadoClinico vestibular,
+            EstadoClinico palatinoLingual,
+            EstadoClinico oclusalIncisal
+    ) {
+        if (estadoGeneral == null) {
+            return EstadoClinico.PRESENTE;
+        }
+        if (estadoGeneral.isInhabilitaCarasIndividuales() || estadoGeneral == EstadoClinico.CORONA) {
+            return estadoGeneral;
+        }
+        boolean todasIguales = (mesial == distal)
+                && (distal == vestibular)
+                && (vestibular == palatinoLingual)
+                && (palatinoLingual == oclusalIncisal);
+
+        // Si solo algunas caras tienen patología y otras están sanas, el estado general del diente es Presente
+        if (!todasIguales) {
+            return EstadoClinico.PRESENTE;
+        }
+        return estadoGeneral;
     }
 
     private String limpiarBloquesMarkdown(String raw) {

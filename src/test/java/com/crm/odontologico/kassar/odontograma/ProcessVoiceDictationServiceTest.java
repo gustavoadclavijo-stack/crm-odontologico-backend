@@ -249,4 +249,87 @@ class ProcessVoiceDictationServiceTest {
         assertNotNull(ex.getUltimosErrores());
         assertTrue(ex.getUltimosErrores().get(0).contains("99"));
     }
+
+    @Test
+    @DisplayName("Debe extraer y reconciliar los 9 dientes cuando el dictado incluye grupos, sintaxis invertida y el modelo trunca la salida")
+    void debeReconciliarLos9DientesEnDictadoComplejoMultiPieza() {
+        // Simula la respuesta truncada del modelo local que solo devolvió del 18 al 12 y omitió 11 y 32
+        OdontogramaAiPort truncatedAiPort = messages -> """
+                {
+                  "dientes": [
+                    {
+                      "numero": 18,
+                      "estadoGeneral": "Caries",
+                      "caras": {
+                        "mesial": "Caries",
+                        "distal": "Sano",
+                        "vestibular": "Sano",
+                        "palatino_lingual": "Sano",
+                        "oclusal_incisal": "Caries"
+                      }
+                    },
+                    {
+                      "numero": 17,
+                      "estadoGeneral": "Sano",
+                      "caras": {
+                        "mesial": "Sano",
+                        "distal": "Sano",
+                        "vestibular": "Sano",
+                        "palatino_lingual": "Sano",
+                        "oclusal_incisal": "Sano"
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        ProcessVoiceDictationService service = new ProcessVoiceDictationService(
+                truncatedAiPort, promptBuilder, validator, mapper, objectMapper, 3
+        );
+
+        VoiceCaptureRequest request = new VoiceCaptureRequest(
+                "odo-front-002",
+                "cliente 18 oclusal caries 17 distal caries 16 15 14 13 y 12 sanos 11 caries en mesial caries en 32 resto de dientes sano"
+        );
+
+        OdontogramaUpdateResponse response = service.procesarDictado(request);
+
+        assertEquals(9, response.dientes().size());
+
+        // Diente 18: solo oclusal caries, resto sano, estadoGeneral Presente
+        DienteData d18 = response.dientes().get(0);
+        assertEquals(18, d18.numero());
+        assertEquals(EstadoClinico.PRESENTE, d18.estadoGeneral().estado());
+        assertEquals(EstadoClinico.CARIES, d18.caras().oclusalIncisal().estado());
+        assertEquals(EstadoClinico.SANO, d18.caras().mesial().estado());
+
+        // Diente 17: distal caries, resto sano
+        DienteData d17 = response.dientes().get(1);
+        assertEquals(17, d17.numero());
+        assertEquals(EstadoClinico.PRESENTE, d17.estadoGeneral().estado());
+        assertEquals(EstadoClinico.CARIES, d17.caras().distal().estado());
+        assertEquals(EstadoClinico.SANO, d17.caras().oclusalIncisal().estado());
+
+        // Dientes 16, 15, 14, 13, 12: sanos
+        for (int idx = 2; idx <= 6; idx++) {
+            DienteData sano = response.dientes().get(idx);
+            assertEquals(EstadoClinico.SANO, sano.estadoGeneral().estado());
+            assertEquals("#22C55E", sano.estadoGeneral().colorHex());
+        }
+
+        // Diente 11: caries en mesial, resto sano
+        DienteData d11 = response.dientes().get(7);
+        assertEquals(11, d11.numero());
+        assertEquals(EstadoClinico.PRESENTE, d11.estadoGeneral().estado());
+        assertEquals(EstadoClinico.CARIES, d11.caras().mesial().estado());
+        assertEquals("Incisal", d11.caras().oclusalIncisal().etiquetaVisual());
+
+        // Diente 32: caries en 32 (Incisivo lateral inferior izquierdo: Lingual + Incisal)
+        DienteData d32 = response.dientes().get(8);
+        assertEquals(32, d32.numero());
+        assertEquals(EstadoClinico.CARIES, d32.estadoGeneral().estado());
+        assertEquals("Lingual", d32.caras().palatinoLingual().etiquetaVisual());
+        assertEquals("Incisal", d32.caras().oclusalIncisal().etiquetaVisual());
+        assertEquals(EstadoClinico.CARIES, d32.caras().oclusalIncisal().estado());
+    }
 }
