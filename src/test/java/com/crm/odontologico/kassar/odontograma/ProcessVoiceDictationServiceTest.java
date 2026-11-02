@@ -332,4 +332,34 @@ class ProcessVoiceDictationServiceTest {
         assertEquals("Incisal", d32.caras().oclusalIncisal().etiquetaVisual());
         assertEquals(EstadoClinico.CARIES, d32.caras().oclusalIncisal().estado());
     }
+
+    @Test
+    @DisplayName("Debe soportar de forma genérica hasta los 32 dientes FDI con rangos y múltiples hallazgos por pieza")
+    void debeSoportarLos32DientesFdiConRangosYMultiplesHallazgos() {
+        OdontogramaAiPort partialAiPort = messages -> """
+                {
+                  "dientes": [
+                    { "numero": 48, "estadoGeneral": "Ausente" }
+                  ]
+                }
+                """;
+
+        ProcessVoiceDictationService service = new ProcessVoiceDictationService(
+                partialAiPort, promptBuilder, validator, mapper, objectMapper, 3
+        );
+
+        VoiceCaptureRequest request = new VoiceCaptureRequest(
+                "odo-32-full",
+                "diente 11 incisal fracturado y mesial caries, del 12 al 18 sanos, del 21 al 28 sanos, del 31 al 38 sanos, del 41 al 47 sanos, diente 48 ausente"
+        );
+
+        OdontogramaUpdateResponse response = service.procesarDictado(request);
+
+        assertEquals(32, response.dientes().size());
+        assertEquals(11, response.dientes().get(0).numero());
+        assertEquals(EstadoClinico.FRACTURADO, response.dientes().get(0).caras().oclusalIncisal().estado());
+        assertEquals(EstadoClinico.CARIES, response.dientes().get(0).caras().mesial().estado());
+        assertEquals(48, response.dientes().get(31).numero());
+        assertEquals(EstadoClinico.AUSENTE, response.dientes().get(31).estadoGeneral().estado());
+    }
 }
