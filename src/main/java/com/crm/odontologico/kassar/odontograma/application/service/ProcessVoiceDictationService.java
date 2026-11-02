@@ -105,7 +105,14 @@ public class ProcessVoiceDictationService {
             log.info("Procesando dictado para odontogramaId='{}' (intento {}/{})",
                     request.odontogramaId(), intento, maxValidationAttempts);
 
-            ultimaRespuestaCruda = aiPort.generarRespuestaJson(historial);
+            long inicioLlamadaAi = System.nanoTime();
+            try {
+                ultimaRespuestaCruda = aiPort.generarRespuestaJson(historial);
+            } finally {
+                long duracionMs = (System.nanoTime() - inicioLlamadaAi) / 1_000_000;
+                log.info("Duración de llamada al LLM para odontogramaId='{}' (intento {}/{}): {} ms",
+                        request.odontogramaId(), intento, maxValidationAttempts, duracionMs);
+            }
             ValidationResult resultadoEstricto = responseValidator.validarContraDictado(
                     ultimaRespuestaCruda, dientesEsperados);
 
